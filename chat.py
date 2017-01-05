@@ -12,16 +12,13 @@ from readline import get_line_buffer
 BUFSIZE = 1024
 BACKPORT = 7789     #状态监听端口
 CHATPORT = 7788     #聊天信息发送窗口
-# START = '>>'
-# INIT = '>>'
-users = {}
-ips = {} 
-#起到双向字典的作用，ip和name互相映射
+
 
 class Cmd():
     START = '>> '
     INIT = '>> '
     outmutex = threading.Lock()
+    anoun = True
 
     @classmethod
     def output_with_rewrite(self, msg):
@@ -46,6 +43,18 @@ class Cmd():
     def reset_start(self):
         self.START = self.INIT
 
+    @classmethod
+    def close_notice(self):
+        self.anoun = False
+
+    @classmethod
+    def open_notice(self):
+        self.anoun = True
+
+    @classmethod
+    def is_notice(self):
+        return self.anoun
+
 class UserList():
     def __init__(self):
         self.users = {}
@@ -65,6 +74,20 @@ class UserList():
             self.mutex.release()
         return ret
 
+    def get_ip(self, name):
+        ip = ''
+        if self.mutex.acquire(1):
+            ip = self.users[name]
+            self.mutex.release()
+        return ip
+
+    def has_name(self, name):
+        ret = False
+        if self.mutex.acquire(1):
+            ret = name in self.users
+            self.mutex.release()
+        return ret
+
     def clear(self):
         if self.mutex.acquire(1):
             self.users.clear()
@@ -81,7 +104,7 @@ class UserList():
         users = []
         if self.mutex.acquire(1):
             for key in self.users:
-                users += key
+                users += [key]
             self.mutex.release()
         return users
 
@@ -113,14 +136,13 @@ class Data():
 
 #后台监听类
 class Back(threading.Thread): 
-    def __init__(self, user_list):
+    def __init__(self, user_list, name):
         threading.Thread.__init__(self)
         self.data = Data()
         self.user_list = user_list
         self.addrb = ('255.255.255.255', BACKPORT)
         self.addrl = ('', BACKPORT)
-        self.name = socket.gethostname()
-        self.name = "jieb"
+        self.name = name
         self.ip = self.data.getip()
         self.thread_stop = False
 
@@ -130,7 +152,7 @@ class Back(threading.Thread):
         elif switch == 1:
             status = 'online'
         #用来处理输入过程中被线程返回消息打乱的情况
-        Cmd.print_with_rewrite('[status]' + name + ' ' + status)
+        Cmd.output_with_rewrite('[status]' + name + ' ' + status)
 
     def broadcast(self, switch):
         bsock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -146,11 +168,7 @@ class Back(threading.Thread):
         rsock.close()
 
     def check(self):
-        # self.user_list.clear()
-        if usermutex.acquire():
-            ips.clear()
-            users.clear()
-            usermutex.release()
+        self.user_list.clear()
         self.broadcast(1)
 
     def run(self):
@@ -161,29 +179,21 @@ class Back(threading.Thread):
         while not self.thread_stop:
             data, addr = lsock.recvfrom(BUFSIZE)
             datalist = self.data.handlebc(data)
-            if usermutex.acquire(1):
-                if datalist[1] == '0':
-                    if ips.has_key(addr[0]):
-                        if anoun == 1:
-                            self.status(datalist[0], 0)
-                        # self.user_list.del_by_ip(addr[0])
-                        del ips[addr[0]]
-                        del users[datalist[0]]
-                elif datalist[1] == '1':
-                    if anoun == 1 and datalist[0] != self.name:
-                        self.status(datalist[0], 1)
-                    # self.user_list.add_user(datalist[0], addr[0])
-                    users[datalist[0]] = addr[0]
-                    ips[addr[0]] = datalist[0]
-                    self.response(addr[0], 2)
-                elif datalist[1] == '2':
-                    if anoun == 1 and datalist[0] != self.name:
-                        self.status(datalist[0], 1)
-                    # self.user_list.add_user(datalist[0], addr[0])
-                    users[datalist[0]] = addr[0]
-                    ips[addr[0]] = datalist[0]
-                usermutex.release()
+            if datalist[1] == '0':
+                if self.user_list.has_ip(addr[0]):
+                    if Cmd.is_notice():
+                        self.status(datalist[0], 0)
+                    self.user_list.del_by_ip(addr[0])
+            elif datalist[1] == '1':
+                if Cmd.is_notice() and datalist[0] != self.name:
+                    self.status(datalist[0], 1)
+                self.user_list.add_user(datalist[0], addr[0])
+            elif datalist[1] == '2':
+                if Cmd.is_notice() and datalist[0] != self.name:
+                    self.status(datalist[0], 1)
+                self.user_list.add_user(datalist[0], addr[0])
         lsock.close()
+
     def stop(self):
         self.broadcast(0)
         self.thread_stop = True
@@ -214,12 +224,12 @@ class Listen(threading.Thread):
 
 #启动入口类
 class Start(): 
-    def __init__(self, user_list):
-        self.name = socket.getfqdn(socket.gethostname())
-        self.user_list
+    def __init__(self, user_list, name):
+        self.name = name
+        self.user_list = user_list
         self.data = Data()
         self.listen = Listen()
-        self.back = Back(user_list)
+        self.back = Back(user_list, self.name)
         print '*******   iichats   ********'
         print '     Written by Kevince     \n'
         print 'This is ' + self.name
@@ -237,68 +247,86 @@ class Start():
 
     def refresh(self):
         out = '\n******Onlinelist******\n'
-        # users = user_list.get_users()
+        users = self.user_list.get_users()
         for key in users:
             out += key + "\n"
         out += '**********************\n'
         Cmd.output(out)
 
+    def cmd_exit(self):
+        os.exit(1)
+
+    def cmd_list(self):
+        self.refresh()
+
+    def cmd_set(self, params):
+        if params[0] == 'status':
+            if params[1] == 'on':
+                Cmd.open_notice()
+            elif params[1] == 'off':
+                Cmd.close_notice()
+
+    def cmd_help(self):
+        self.helpinfo()
+
+    def cmd_check(self):
+        self.back.check()
+        print 'checking the list...'
+        time.sleep(3)
+        self.refresh()
+
+    def cmd_chat(self, name):
+        if not self.user_list.has_name(name):
+            Cmd.output('this host does not exist')
+            return ('', True)
+        addr = (self.user_list.get_ip(name), CHATPORT)
+        Cmd.output('now chatting to ' + name+ \
+                " ,use ':quit' to quit CHAT mode")
+        Cmd.set_start(name + Cmd.INIT)
+        return (addr, False)
+
     def chatting(self):
         csock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         Cmd.output("use ':help' to get help information")
 
-        name = ''
-        address = ''
-        global anoun
-        global START
+        addr = ''
+        in_chat = True
         while True:
             arg = raw_input(Cmd.START)
-            if arg[0:5] == ':quit' and Cmd.START != Cmd.INIT:
-                name = ''
-                address = ''
-                Cmd.reset_start()
-            elif arg[0] == ':' and Cmd.START == Cmd.INIT:
-                if arg[1:] == 'exit':
-                    break
-                elif arg[1:5] == 'list':
-                    self.refresh()
-                    continue
-                elif arg[1:12] == 'set status ':
-                    if arg[12:] == 'on':
-                        anoun = 1
-                    elif arg[12:] == 'off':
-                        anoun = 0
-                    continue
-                elif arg[1:5] == 'help':
-                    self.helpinfo()
-                    continue
-                elif arg[1:6] == 'check':
-                    self.back.check()
-                    print 'checking the list...'
-                    time.sleep(3)
-                    self.refresh()
-                elif arg[1:6] == 'chat ':
-                    name = arg[6:]
-                    if usermutex.acquire(1):
-                        userlist = users.keys()
-                        usermutex.release()
-                    if name not in userlist:
-                        Cmd.output('this host does not exist')
-                        continue
-                    address = (users.get(name), CHATPORT)
-                    Cmd.output('now chatting to ' + name+ \
-                            " ,use ':quit' to quit CHAT mode")
-                    Cmd.set_start(name + Cmd.INIT)
+            if len(arg) < 1:
+                continue
+            if arg[0] == ':':
+                args = arg[1:].rsplit()
+                if args[0] == 'quit':
+                    if in_chat:
+                        addr = 0
+                        in_chat = False
+                        Cmd.reset_start()
+                elif args[0] == 'exit':
+                    self.cmd_exit()
+                elif args[0] == 'list':
+                    self.cmd_list()
+                elif args[0] == 'set':
+                    self.cmd_set(args[1:])
+                elif args[0] == 'help':
+                    self.cmd_help()
+                elif args[0] == 'check':
+                    self.cmd_check()
+                elif args[0] == 'chat':
+                    addr, err = self.cmd_chat(args[1])
+                    if not err:
+                        in_chat = True
                 else:
                     Cmd.output("invalid input, use ':help' to get some info")
             else:
-                if not len(address):
+                if not in_chat:
                     Cmd.output("you can CHAT to someone, or use ':help'")
                     continue
                 data = arg
                 msg = self.data.makechat(data, self.name)
-                csock.sendto(msg, address)
+                csock.sendto(msg, addr)
         csock.close()
+
     def start(self):
         self.back.setDaemon(True)
         self.back.start()
@@ -309,11 +337,14 @@ class Start():
         self.listen.stop()
         sys.exit()
 
-usermutex = threading.Lock()
-# outmutex = threading.Lock()
-#控制status on和off的情况
-anoun = 1
 def main():
+    if len(sys.argv) < 2:
+        name = socket.getfqdn(socket.gethostname()) 
+    else:
+        name = sys.argv[1]
     user_list = UserList()
-    s = Start(user_list)
+    s = Start(user_list, name)
     s.start()
+
+if __name__ == '__main__':
+    main()
